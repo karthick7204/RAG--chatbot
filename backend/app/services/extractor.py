@@ -81,6 +81,8 @@ class MetadataExtractor:
             'no_warnings': True,
             'skip_download': True,
             'extract_flat': False,
+            'socket_timeout': 3.0,
+            'retries': 0,
         }
         
         try:
@@ -164,6 +166,8 @@ class MetadataExtractor:
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
+            'socket_timeout': 3.0,
+            'retries': 0,
         }
         try:
             logger.info(f"Method 1: Attempting Instagram metadata extraction via yt-dlp for {shortcode}")
@@ -271,7 +275,7 @@ class MetadataExtractor:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept-Language": "en-US,en;q=0.9",
                 }
-                resp = requests.get(url, headers=headers, timeout=10)
+                resp = requests.get(url, headers=headers, timeout=2.5)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, 'html.parser')
                     

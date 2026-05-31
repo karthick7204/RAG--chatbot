@@ -149,3 +149,55 @@ class QdrantStorageService:
                 "stored_chunks": 0,
                 "status": f"failed: {str(e)}"
             }
+
+    @classmethod
+    def check_video_exists(
+        cls,
+        video_id: str,
+        collection_name: str = "video_analysis"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Checks if a video_id already has indexed points in Qdrant.
+        If yes, reconstructs and returns the metadata from the payload of the first found chunk.
+        """
+        if not video_id:
+            return None
+            
+        try:
+            client = cls.get_client()
+            if not client.collection_exists(collection_name):
+                return None
+                
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            
+            # Query Qdrant for a point matching the video_id
+            res = client.scroll(
+                collection_name=collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="video_id",
+                            match=MatchValue(value=video_id)
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True
+            )
+            
+            points = res[0]
+            if points:
+                payload = points[0].payload
+                # Filter out chunk-specific keys to reconstruct metadata response
+                metadata_keys = [
+                    "platform", "video_id", "title", "creator", "followers",
+                    "views", "likes", "comments", "duration", "upload_date",
+                    "hashtags", "description", "thumbnail", "engagement_rate"
+                ]
+                metadata = {k: payload[k] for k in metadata_keys if k in payload}
+                return metadata
+                
+            return None
+        except Exception as e:
+            logger.error(f"Error checking Qdrant for video {video_id}: {e}")
+            return None

@@ -30,6 +30,20 @@ except ImportError:
     logger.warning("faster-whisper not installed. Falling back to mock or OpenAI Whisper API.")
 
 class Transcriber:
+    _whisper_instance = None
+
+    @classmethod
+    def get_whisper_model(cls):
+        """
+        Loads and returns a cached singleton instance of WhisperModel.
+        """
+        if not WhisperModel:
+            return None
+        if cls._whisper_instance is None:
+            logger.info("Initializing cached WhisperModel 'tiny' on CPU with int8 computation")
+            cls._whisper_instance = WhisperModel("tiny", device="cpu", compute_type="int8")
+        return cls._whisper_instance
+
     @classmethod
     def fetch_youtube_transcript_data(cls, video_id: str) -> Optional[tuple[str, str]]:
         """
@@ -89,6 +103,7 @@ class Transcriber:
         Downloads audio stream from YouTube/Instagram URL using yt-dlp.
         Returns the path to the downloaded file, or None if it fails.
         Does not require system FFmpeg, downloads the raw stream format directly.
+        Enforces a maximum duration cap of 5 minutes (300 seconds) in a single pass.
         """
         if not yt_dlp:
             logger.error("yt_dlp is not available.")
@@ -96,29 +111,46 @@ class Transcriber:
             
         try:
             os.makedirs(output_dir, exist_ok=True)
+            
             url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-            # Use timestamp + hash to keep files unique
             outtmpl = os.path.join(output_dir, f"audio_{int(time.time())}_{url_hash}.%(ext)s")
             
+            def duration_filter(info_dict, *, incomplete):
+                duration = info_dict.get('duration')
+                if duration and duration > 300:
+                    return 'Video is too long (exceeds 5 minutes)'
+                return None
+                
             ydl_opts = {
-                'format': 'bestaudio/best',
+                'format': 'worstaudio/worst',
                 'outtmpl': outtmpl,
                 'quiet': True,
                 'no_warnings': True,
+                'nocheckcertificate': True,
+                'ignoreerrors': True,
+                'match_filter': duration_filter,
+                'socket_timeout': 5.0, # Fast socket timeout
             }
             
-            logger.info(f"Downloading raw audio stream from URL: {url}")
+            logger.info(f"Downloading optimized raw audio stream (single pass) from URL: {url}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                # Find the actual downloaded file path
-                filename = ydl.prepare_filename(info)
+                if not info:
+                    logger.warning("No audio info retrieved or download skipped.")
+                    return None
+                    
+                # If matched filter skipped the download, verify duration in info
+                duration = info.get('duration', 0)
+                if duration and duration > 300:
+                    logger.warning(f"Download skipped: Video duration ({duration}s) exceeds 5 minutes limit.")
+                    return None
                 
-                # Check if the prepared filename exists
+                filename = ydl.prepare_filename(info)
                 if os.path.exists(filename):
                     logger.info(f"Audio downloaded to: {filename}")
                     return os.path.abspath(filename)
                 
-                # Handle cases where extension was resolved dynamically
+                # Check for dynamic extensions
                 base_name = os.path.splitext(filename)[0]
                 for ext in ['webm', 'm4a', 'webm.part', 'm4a.part', 'mp3', 'wav', '3gp']:
                     check_path = f"{base_name}.{ext}"
@@ -142,12 +174,9 @@ class Transcriber:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found: {file_path}")
             
-        if WhisperModel:
+        model = cls.get_whisper_model()
+        if model:
             try:
-                logger.info(f"Initializing Whisper model 'tiny' on CPU with int8 computation")
-                # Use CPU and int8 for lightweight execution
-                model = WhisperModel("tiny", device="cpu", compute_type="int8")
-                
                 logger.info(f"Transcribing audio file: {file_path}")
                 segments, info = model.transcribe(file_path, beam_size=5)
                 

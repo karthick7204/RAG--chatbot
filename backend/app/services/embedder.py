@@ -14,6 +14,13 @@ class TranscriptEmbedder:
         Uses class-level caching to avoid reloading the model.
         """
         if cls._embeddings_instance is None:
+            import torch
+            logger.info("Setting PyTorch CPU thread limit to 2 to optimize inference and reduce overhead.")
+            try:
+                torch.set_num_threads(2)
+            except Exception as torch_err:
+                logger.warning(f"Could not set PyTorch thread limit: {torch_err}")
+                
             logger.info("Initializing HuggingFaceEmbeddings model: BAAI/bge-small-en-v1.5")
             cls._embeddings_instance = HuggingFaceEmbeddings(
                 model_name="BAAI/bge-small-en-v1.5",

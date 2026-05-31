@@ -31,6 +31,7 @@ class QueryState(TypedDict):
     video_metadata: List[Dict[str, Any]]
     collection_name: Optional[str]
     retrieved_chunks: Optional[List[Dict[str, Any]]]
+    metrics_analysis: Optional[Dict[str, Any]]
     context: Optional[str]
     response: Optional[str]
 
@@ -157,16 +158,36 @@ def retriever_node(state: QueryState) -> Dict[str, Any]:
     return {"retrieved_chunks": chunks}
 
 
-def context_builder_node(state: QueryState) -> Dict[str, Any]:
+def metrics_analysis_node(state: QueryState) -> Dict[str, Any]:
     """
-    Combines retrieved transcript chunks and video metadata into a structured context string.
+    Calculates weighted performance scores and reach/engagement summaries.
+    """
+    video_metadata = state.get("video_metadata") or []
+    logger.info(f"[LangGraph Node] Running Metrics Analysis Node for {len(video_metadata)} videos.")
+    analysis = RetrievalAnalysisService.analyze_metrics(video_metadata)
+    return {"metrics_analysis": analysis}
+
+
+def comparison_node(state: QueryState) -> Dict[str, Any]:
+    """
+    Combines retrieved transcript chunks, video metadata, and metrics analysis into a unified context.
     """
     retrieved_chunks = state.get("retrieved_chunks") or []
     video_metadata = state.get("video_metadata") or []
+    metrics_analysis = state.get("metrics_analysis") or {}
     
-    logger.info(f"[LangGraph Node] Running Context Builder Node with {len(retrieved_chunks)} chunks and {len(video_metadata)} videos.")
-    context = RetrievalAnalysisService.build_context(retrieved_chunks, video_metadata)
+    logger.info(f"[LangGraph Node] Running Comparison Node (context builder) with {len(retrieved_chunks)} chunks.")
+    context = RetrievalAnalysisService.build_context(retrieved_chunks, video_metadata, metrics_analysis)
     return {"context": context}
+
+
+def context_builder_node(state: QueryState) -> Dict[str, Any]:
+    """
+    Wrapper node for backward compatibility in tests. Runs metrics_analysis and comparison nodes.
+    """
+    metrics_res = metrics_analysis_node(state)
+    combined_state = {**state, **metrics_res}
+    return comparison_node(combined_state)
 
 
 def answer_generation_node(state: QueryState) -> Dict[str, Any]:
@@ -189,12 +210,14 @@ def answer_generation_node(state: QueryState) -> Dict[str, Any]:
 # 2. Compile Query Pipeline (Retrieval & Analysis)
 query_workflow = StateGraph(QueryState)
 query_workflow.add_node("retriever", retriever_node)
-query_workflow.add_node("context_builder", context_builder_node)
+query_workflow.add_node("metrics_analysis", metrics_analysis_node)
+query_workflow.add_node("comparison", comparison_node)
 query_workflow.add_node("answer_generation", answer_generation_node)
 
 query_workflow.set_entry_point("retriever")
-query_workflow.add_edge("retriever", "context_builder")
-query_workflow.add_edge("context_builder", "answer_generation")
+query_workflow.add_edge("retriever", "metrics_analysis")
+query_workflow.add_edge("metrics_analysis", "comparison")
+query_workflow.add_edge("comparison", "answer_generation")
 query_workflow.add_edge("answer_generation", END)
 
 query_pipeline = query_workflow.compile()

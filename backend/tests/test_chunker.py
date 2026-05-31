@@ -11,6 +11,9 @@ from app.services.pipeline import (
     embedding_generation_node,
     qdrant_storage_node,
     retriever_node,
+    metrics_analysis_node,
+    comparison_node,
+    context_builder_node,
     answer_generation_node,
     GraphState,
     QueryState,
@@ -397,6 +400,79 @@ class TestChunker(unittest.TestCase):
         self.assertIn("response", final_state)
         self.assertIn("Sources:", final_state["response"])
         self.assertIn("vidA_chunk_1", final_state["response"])
+
+    def test_weighted_performance_scoring(self):
+        # Video A has high reach, lower engagement rate
+        # Video B has low reach, higher engagement rate
+        video_metadata = [
+            {
+                "video_id": "video_high_reach",
+                "title": "High Reach Video",
+                "views": 1000000,
+                "likes": 10000,
+                "comments": 1000,
+                "engagement_rate": 1.1
+            },
+            {
+                "video_id": "video_high_engagement",
+                "title": "High Engagement Video",
+                "views": 10000,
+                "likes": 900,
+                "comments": 100,
+                "engagement_rate": 10.0
+            }
+        ]
+        
+        # Test RetrievalAnalysisService.analyze_metrics directly
+        analysis = RetrievalAnalysisService.analyze_metrics(video_metadata)
+        self.assertIn("scores", analysis)
+        self.assertIn("summary", analysis)
+        
+        scores = analysis["scores"]
+        score_a = scores["video_a"]
+        score_b = scores["video_b"]
+        
+        # The high-reach video should win overall due to the weighted factors
+        self.assertTrue(score_a > score_b)
+        
+        # The summary should mention both scores and describe the trade-off
+        self.assertIn("High Reach Video", analysis["summary"])
+        self.assertIn("High Engagement Video", analysis["summary"])
+        self.assertIn("achieved significantly stronger reach", analysis["summary"])
+        self.assertIn("demonstrated stronger audience interaction quality", analysis["summary"])
+        
+        # Verify metrics_analysis_node and comparison_node can run with this
+        state: QueryState = {
+            "question": "Compare the metrics of these videos.",
+            "video_metadata": video_metadata,
+            "collection_name": "video_analysis",
+            "retrieved_chunks": [
+                {"chunk_id": "chunk_1", "video_id": "video_high_reach", "text": "Hook text for high reach"}
+            ],
+            "metrics_analysis": None,
+            "context": None,
+            "response": None
+        }
+        
+        metrics_res = metrics_analysis_node(state)
+        self.assertIn("metrics_analysis", metrics_res)
+        self.assertTrue(metrics_res["metrics_analysis"]["scores"]["video_a"] > metrics_res["metrics_analysis"]["scores"]["video_b"])
+        
+        comp_state = {**state, **metrics_res}
+        comp_res = comparison_node(comp_state)
+        self.assertIn("context", comp_res)
+        self.assertIn("METRICS PERFORMANCE SUMMARY:", comp_res["context"])
+        
+        # Run answer generation node with fallback
+        ans_state = {**comp_state, **comp_res}
+        ans_res = answer_generation_node(ans_state)
+        self.assertIn("response", ans_res)
+        
+        # The answer response should contain details about the trade-off
+        response_text = ans_res["response"]
+        self.assertIn("High Reach Video", response_text)
+        self.assertIn("High Engagement Video", response_text)
+        self.assertIn("tradeoff between reach and engagement", response_text)
 
 if __name__ == "__main__":
     unittest.main()

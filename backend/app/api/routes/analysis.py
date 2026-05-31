@@ -21,24 +21,68 @@ def analyze_videos(payload: CompareRequest):
     try:
         logger.info(f"Received compare/analyze request. YouTube: {payload.youtube_url} | Instagram: {payload.instagram_url}")
         
-        # 1. Run YouTube Indexing Pipeline
-        logger.info(f"Running indexing pipeline for YouTube URL: {payload.youtube_url}")
-        state_a = indexing_pipeline.invoke({"url": payload.youtube_url})
-        metadata_a = state_a.get("metadata")
-        if not metadata_a:
-            raise ValueError(f"Failed to retrieve metadata for YouTube URL: {payload.youtube_url}")
+        # Extract video IDs
+        from app.services.extractor import MetadataExtractor
+        from app.services.qdrant_storage import QdrantStorageService
+        
+        id_yt = ""
+        id_insta = ""
+        
+        try:
+            if "youtube.com" in payload.youtube_url or "youtu.be" in payload.youtube_url:
+                id_yt = MetadataExtractor.extract_youtube_id(payload.youtube_url)
+        except Exception as e:
+            logger.warning(f"Could not parse YouTube ID from URL: {e}")
             
-        # 2. Run Instagram Indexing Pipeline
-        logger.info(f"Running indexing pipeline for Instagram URL: {payload.instagram_url}")
-        state_b = indexing_pipeline.invoke({"url": payload.instagram_url})
-        metadata_b = state_b.get("metadata")
+        try:
+            if "instagram.com" in payload.instagram_url:
+                id_insta = MetadataExtractor.extract_instagram_shortcode(payload.instagram_url)
+        except Exception as e:
+            logger.warning(f"Could not parse Instagram shortcode from URL: {e}")
+            
+        # Check cache
+        metadata_a = QdrantStorageService.check_video_exists(id_yt) if id_yt else None
+        metadata_b = QdrantStorageService.check_video_exists(id_insta) if id_insta else None
+        
+        # Only run indexing pipeline for videos not found in cache
+        tasks_to_run = {}
+        if not metadata_a:
+            logger.info(f"YouTube video {id_yt} not in cache. Indexing...")
+            tasks_to_run["youtube"] = payload.youtube_url
+        else:
+            logger.info(f"YouTube video {id_yt} found in Qdrant cache.")
+            
         if not metadata_b:
-            raise ValueError(f"Failed to retrieve metadata for Instagram Reel URL: {payload.instagram_url}")
+            logger.info(f"Instagram Reel {id_insta} not in cache. Indexing...")
+            tasks_to_run["instagram"] = payload.instagram_url
+        else:
+            logger.info(f"Instagram Reel {id_insta} found in Qdrant cache.")
+            
+        if tasks_to_run:
+            from concurrent.futures import ThreadPoolExecutor
+            logger.info(f"Running indexing pipelines in parallel for {list(tasks_to_run.keys())}")
+            
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {}
+                for key, url in tasks_to_run.items():
+                    futures[key] = executor.submit(indexing_pipeline.invoke, {"url": url})
+                
+                if "youtube" in futures:
+                    state_a = futures["youtube"].result()
+                    metadata_a = state_a.get("metadata")
+                    if not metadata_a:
+                        raise ValueError(f"Failed to retrieve metadata for YouTube URL: {payload.youtube_url}")
+                        
+                if "instagram" in futures:
+                    state_b = futures["instagram"].result()
+                    metadata_b = state_b.get("metadata")
+                    if not metadata_b:
+                        raise ValueError(f"Failed to retrieve metadata for Instagram Reel URL: {payload.instagram_url}")
             
         # 3. Update LATEST_ANALYZED_VIDEOS session cache
         global LATEST_ANALYZED_VIDEOS
         LATEST_ANALYZED_VIDEOS = [metadata_a, metadata_b]
-        logger.info("Successfully analyzed both videos and updated session cache.")
+        logger.info("Successfully analyzed both videos concurrently and updated session cache.")
         
         return LATEST_ANALYZED_VIDEOS
         
