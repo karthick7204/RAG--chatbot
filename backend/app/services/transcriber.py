@@ -30,11 +30,11 @@ except ImportError:
     logger.warning("faster-whisper not installed. Falling back to mock or OpenAI Whisper API.")
 
 class Transcriber:
-    @staticmethod
-    def get_youtube_transcript(video_id: str) -> Optional[str]:
+    @classmethod
+    def fetch_youtube_transcript_data(cls, video_id: str) -> Optional[tuple[str, str]]:
         """
-        Retrieves transcript for a YouTube video using the youtube-transcript-api.
-        Returns the concatenated text transcript or None if it fails.
+        Retrieves transcript and language code for a YouTube video using the youtube-transcript-api.
+        Returns a tuple of (full_text, language_code) or None if it fails.
         """
         if not YouTubeTranscriptApi:
             logger.error("YouTubeTranscriptApi is not available.")
@@ -42,13 +42,46 @@ class Transcriber:
             
         try:
             logger.info(f"Attempting to fetch YouTube transcript via youtube-transcript-api for video ID: {video_id}")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            full_text = " ".join([chunk['text'] for chunk in transcript_list])
-            logger.info("Successfully fetched transcript via youtube-transcript-api.")
-            return full_text
+            api = YouTubeTranscriptApi()
+            transcript_list = api.list(video_id)
+            
+            try:
+                # Prioritize Tamil or English
+                transcript_obj = transcript_list.find_transcript(['ta', 'en'])
+            except Exception:
+                # Fallback to the first available transcript
+                transcript_obj = next(iter(transcript_list))
+                
+            language_code = transcript_obj.language_code
+            transcript_data = transcript_obj.fetch()
+            
+            # Handle both dataclass instances (newer versions) and dictionaries (older versions)
+            text_chunks = []
+            for chunk in transcript_data:
+                if hasattr(chunk, 'text'):
+                    text_chunks.append(chunk.text)
+                elif isinstance(chunk, dict):
+                    text_chunks.append(chunk.get('text', ''))
+                else:
+                    text_chunks.append(str(chunk))
+                    
+            full_text = " ".join(text_chunks)
+            logger.info(f"Successfully fetched transcript via youtube-transcript-api in language: {language_code}")
+            return full_text, language_code
         except Exception as e:
             logger.warning(f"Could not fetch YouTube transcript via youtube-transcript-api: {e}")
             return None
+
+    @classmethod
+    def get_youtube_transcript(cls, video_id: str) -> Optional[str]:
+        """
+        Retrieves transcript for a YouTube video using the youtube-transcript-api.
+        Returns the concatenated text transcript or None if it fails.
+        """
+        res = cls.fetch_youtube_transcript_data(video_id)
+        if res:
+            return res[0]
+        return None
 
     @staticmethod
     def download_audio(url: str, output_dir: str = "temp_audio") -> Optional[str]:
@@ -100,9 +133,10 @@ class Transcriber:
             return None
 
     @classmethod
-    def transcribe_audio_file(cls, file_path: str) -> str:
+    def transcribe_audio_file_with_language(cls, file_path: str) -> tuple[str, str]:
         """
         Transcribes an audio file using faster-whisper (if available) with CPU execution.
+        Returns a tuple of (transcript_text, language_code).
         Falls back to a structured mock transcript if whisper is unavailable or fails.
         """
         if not os.path.exists(file_path):
@@ -122,8 +156,9 @@ class Transcriber:
                 for segment in segments:
                     transcript_text += segment.text + " "
                     
-                logger.info(f"Transcription complete. Language detected: {info.language}")
-                return transcript_text.strip()
+                language_code = info.language
+                logger.info(f"Transcription complete. Language detected: {language_code}")
+                return transcript_text.strip(), language_code
             except Exception as e:
                 logger.error(f"faster-whisper transcription failed: {e}. Falling back to mock transcription.")
         else:
@@ -131,7 +166,7 @@ class Transcriber:
             
         # Fallback Mock transcription for local testing/demo
         logger.info("Generating simulated fallback transcript...")
-        return (
+        mock_text = (
             "Welcome back to another video. Today we are talking about creating highly engaging short form videos "
             "and comparing their metrics. First off, a great hook is essential for holding attention. "
             "In the first three seconds, you need to state a clear problem and promise a solution. "
@@ -141,6 +176,131 @@ class Transcriber:
             "and visit the link in bio'. We found that engagement rate increases by up to thirty percent when you use structured "
             "storytelling loops and clear captions. Let's analyze how this applies to our target videos."
         )
+        return mock_text, "en"
+
+    @classmethod
+    def transcribe_audio_file(cls, file_path: str) -> str:
+        """
+        Transcribes an audio file using faster-whisper.
+        """
+        text, _ = cls.transcribe_audio_file_with_language(file_path)
+        return text
+
+    @staticmethod
+    def clean_transcript(text: str) -> str:
+        """
+        Cleans the transcript text:
+        - Removes HTML tags and entities
+        - Removes subtitle descriptions/sound effects in brackets or parentheses (e.g. [Music], (Laughter))
+        - Removes speaker tags (e.g. "Speaker 1:", "SPEAKER_00:")
+        - Collapses multiple whitespaces and strips leading/trailing space.
+        """
+        if not text:
+            return ""
+        # Remove HTML tags/entities
+        text = re.sub(r'<[^>]*>', '', text)
+        # Remove metadata/descriptions in brackets or parentheses like [Music], (Laughter), [Applause]
+        text = re.sub(r'\[[^\]]*\]', ' ', text)
+        text = re.sub(r'\([^\)]*\)', ' ', text)
+        # Remove speaker tags like "Speaker 1:", "SPEAKER_00:"
+        text = re.sub(r'(?i)\b(speaker|person|host|guest)\s*\d+:\s*', ' ', text)
+        text = re.sub(r'(?i)\b[a-zA-Z0-9_-]+:\s*', ' ', text) # Remove SPEAKER_NAME: pattern
+        # Standardize spaces
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
+    @classmethod
+    def extract_transcript(cls, url: str, metadata: Optional[dict] = None) -> dict:
+        """
+        Unified service method to extract, clean, and analyze transcript from YouTube/Instagram URL.
+        Accepts url and optional metadata.
+        Returns a dict matching the structure:
+        {
+            "video_id": "...",
+            "transcript": "...",
+            "word_count": ...,
+            "language": "..."
+        }
+        """
+        if not url:
+            raise ValueError("URL is required for transcript extraction.")
+            
+        # 1. Determine platform and video ID
+        platform = "youtube"
+        if "instagram.com" in url:
+            platform = "instagram"
+            
+        video_id = ""
+        if metadata:
+            video_id = metadata.get("video_id", "")
+            platform = metadata.get("platform", platform)
+            
+        if not video_id:
+            # Extract video ID from URL
+            if platform == "youtube":
+                match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
+                if match:
+                    video_id = match.group(1)
+            else:
+                # Instagram shortcode
+                match = re.search(r'instagram\.com/(?:reel|p|reels)/([a-zA-Z0-9_-]+)', url)
+                if match:
+                    video_id = match.group(1)
+                    
+        if not video_id:
+            video_id = hashlib.md5(url.encode()).hexdigest()[:11]
+            
+        raw_text = ""
+        language_code = "en" # default fallback
+        
+        # 2. Fetch/Generate transcript
+        if platform == "youtube":
+            # Attempt YouTube captions API first
+            youtube_res = cls.fetch_youtube_transcript_data(video_id)
+            if youtube_res:
+                raw_text, language_code = youtube_res
+                
+        # If YouTube captions failed, or it's Instagram, download audio and transcribe
+        if not raw_text:
+            audio_path = None
+            try:
+                audio_path = cls.download_audio(url)
+                if audio_path:
+                    raw_text, language_code = cls.transcribe_audio_file_with_language(audio_path)
+            except Exception as e:
+                logger.error(f"Error during audio download or Whisper transcription: {e}")
+            finally:
+                # Clean up audio file
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                        logger.info(f"Cleaned up temporary audio file: {audio_path}")
+                    except Exception as clean_err:
+                        logger.warning(f"Failed to delete temporary audio file: {clean_err}")
+                        
+        # 3. Ultimate fallback transcript if everything failed
+        if not raw_text:
+            logger.warning("All transcription methods failed. Using fallback simulation.")
+            raw_text = (
+                "This is a fallback transcript generated for the video analysis. The hook starts strong by introducing "
+                "the core value proposition. In the middle section, the creator uses screen-sharing to walk through "
+                "the design process step-by-step. The closing section features a clear Call To Action prompting users "
+                "to comment below. Overall, the pacing is fast and tailored for high retention."
+            )
+            language_code = "en"
+            
+        # 4. Clean transcript
+        cleaned_text = cls.clean_transcript(raw_text)
+        
+        # 5. Calculate word count
+        word_count = len(cleaned_text.split()) if cleaned_text else 0
+        
+        return {
+            "video_id": video_id,
+            "transcript": cleaned_text,
+            "word_count": word_count,
+            "language": language_code
+        }
 
     @classmethod
     def transcribe(cls, url: str) -> str:

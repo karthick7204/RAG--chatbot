@@ -40,3 +40,6 @@ def root():
         "message": f"Welcome to the {settings.PROJECT_NAME}!",
         "docs_url": "/docs"
     }
+
+main = app
+
